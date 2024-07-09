@@ -12,6 +12,7 @@ contract CLAMM {
     using SafeCast for int256;
     using Position for mapping(bytes32 => Position.Info);
     using Position for Position.Info;
+    using Tick for mapping(int24 => Tick.Info);
 
     address public immutable token0;
     address public immutable token1;
@@ -47,6 +48,7 @@ contract CLAMM {
     // Mappings
     ///////////
     mapping(bytes32 => Position.Info) public positions;
+    mapping(int24 => Tick.Info) public ticks;
 
     /////////////
     // Modifiers:
@@ -145,7 +147,38 @@ contract CLAMM {
         uint256 _feeGrowthGlobal0X128 = 0;
         uint256 _feeGrowthGlobal1X128 = 0;
 
-        // Update the posotion: ToDO Fees (0,0)
-        position.update(liquidityDelta, 0, 0);
+        // if we need to update the ticks, do it
+        bool flippedLower;
+        bool flippedUpper;
+        // IF LiqDelta not 0
+        if (liquidityDelta != 0) {
+            flippedLower = ticks.update(
+                tickLower,
+                tick,
+                liquidityDelta,
+                _feeGrowthGlobal0X128,
+                _feeGrowthGlobal1X128,
+                false,
+                maxLiquidityPerTick
+            );
+        }
+        if (liquidityDelta != 0) {
+            flippedUpper = ticks.update(
+                tickUpper, tick, liquidityDelta, _feeGrowthGlobal0X128, _feeGrowthGlobal1X128, true, maxLiquidityPerTick
+            );
+
+            // Update the posotion: ToDO Fees (0,0)
+            position.update(liquidityDelta, 0, 0);
+
+            // If liqDelta < 0 >>> we removing liquidity
+            if (liquidityDelta < 0) {
+                if (flippedLower) {
+                    ticks.clear(tickLower);
+                }
+                if (flippedUpper) {
+                    ticks.clear(tickUpper);
+                }
+            }
+        }
     }
 }
