@@ -44,8 +44,51 @@ contract CLAMM {
         int128 liquidityDelta;
     }
 
+    // ..........
+    // Struct Swap
+    // ...........
+    struct SwapCache {
+        // liquidity at the beginning of the swap
+        uint128 liquidityStart;
+    }
+
+    // the top level state of the swap, the results of which are recorded in storage at the end
+    struct SwapState {
+        // the amount remaining to be swapped in/out of the input/output asset
+        int256 amountSpecifiedRemaining;
+        // the amount already swapped out/in of the output/input asset
+        int256 amountCalculated;
+        // current sqrt(price)
+        uint160 sqrtPriceX96;
+        // the tick associated with the current price
+        int24 tick;
+        // the global fee growth of the input token
+        uint256 feeGrowthGlobalX128;
+        // the current liquidity in range
+        uint128 liquidity;
+    }
+
+    struct StepComputations {
+        // the price at the beginning of the step
+        uint160 sqrtPriceStartX96;
+        // the next tick to swap to from the current tick in the swap direction
+        int24 tickNext;
+        // whether tickNext is initialized or not
+        bool initialized;
+        // sqrt(price) for the next tick (1/0)
+        uint160 sqrtPriceNextX96;
+        // how much is being swapped in in this step
+        uint256 amountIn;
+        // how much is being swapped out
+        uint256 amountOut;
+        // how much fee is being paid in
+        uint256 feeAmount;
+    }
+
     Slot0 public slot0;
     uint128 public liquidity;
+    uint256 public feeGrowthGlobal0X128;
+    uint256 public feeGrowthGlobal1X128;
 
     ///////////
     // Mappings
@@ -226,6 +269,9 @@ contract CLAMM {
         }
     }
 
+    // ....................
+    // - External Functions
+    // ....................
     function collect(
         address recipient,
         int24 tickLower,
@@ -276,6 +322,92 @@ contract CLAMM {
         if (amount0 > 0 || amount1 > 0) {
             (position.tokensOwed0, position.tokensOwed1) =
                 (position.tokensOwed0 + uint128(amount0), position.tokensOwed1 + uint128(amount1));
+        }
+    }
+
+    function swap(
+        address recipient,
+        bool zeroForOne, // 041/140
+        int256 amountSpecified, // + >> excatIn / - >> excatOut
+        uint160 sqrtPriceLimitX96 // if curretn sqrtPrice reaches the limit - trade ll stop
+            // bytes calldata data // we are not using this
+    ) external lock returns (int256 amount0, int256 amount1) {
+        require(amountSpecified != 0);
+
+        Slot0 memory slot0Start = slot0;
+
+        // sqrtPriceLinit: wer it is depends if swap041 or 140
+        // 041 >> will push price to the left >> sqrtPriceLinit should be left of CurretnPrice
+        require(
+            zeroForOne
+                ? sqrtPriceLimitX96 < slot0Start.sqrtPriceX96 && sqrtPriceLimitX96 > TickMath.MIN_SQRT_RATIO
+                : sqrtPriceLimitX96 > slot0Start.sqrtPriceX96 && sqrtPriceLimitX96 < TickMath.MIN_SQRT_RATIO,
+            "Invalid sqrt Price Limit"
+        );
+
+        // struct SwapCash
+        SwapCache memory cache = SwapCache({liquidityStart: liquidity});
+
+        bool exactInput = amountSpecified > 0;
+
+        SwapState memory state = SwapState({
+            amountSpecifiedRemaining: amountSpecified,
+            amountCalculated: 0,
+            sqrtPriceX96: slot0Start.sqrtPriceX96,
+            tick: slot0Start.tick,
+            feeGrowthGlobalX128: zeroForOne ? feeGrowthGlobal0X128 : feeGrowthGlobal1X128,
+            liquidity: cache.liquidityStart
+        });
+
+        // amountCalculated: while loop ToDo
+        while (true) {}
+        // update tick and write an oracle entry if the tick change
+
+        // Update sqrtPriceX96 and tick, if not same then update
+        if (state.tick != slot0Start.tick) {
+            (slot0.sqrtPriceX96, slot0.tick) = (state.sqrtPriceX96, state.tick);
+        } else {
+            slot0.sqrtPriceX96 = state.sqrtPriceX96;
+        }
+
+        // UPdate Liquidity -liqStart is before we do the trade
+        if (cache.liquidityStart != state.liquidity) {
+            liquidity = state.liquidity;
+        }
+
+        // Update fee global
+        if (zeroForOne) {
+            feeGrowthGlobal0X128 = state.feeGrowthGlobalX128;
+        } else {
+            feeGrowthGlobal1X128 = state.feeGrowthGlobalX128;
+        }
+        // Calc amount tokenIn and tokenOut
+        // list of conditions:
+        // Set amount0 and amount1
+        // zero for one | exact input |
+        //    true      |    true     | amount 0 = specified - remaining (> 0)
+        //              |             | amount 1 = calculated            (< 0)
+        //    false     |    false    | amount 0 = specified - remaining (< 0)
+        //              |             | amount 1 = calculated            (> 0)
+        //    false     |    true     | amount 0 = calculated            (< 0)
+        //              |             | amount 1 = specified - remaining (> 0)
+        //    true      |    false    | amount 0 = calculated            (> 0)
+        //              |             | amount 1 = specified - remaining (< 0)
+        (amount0, amount1) = zeroForOne == exactInput
+            ? (amountSpecified - state.amountSpecifiedRemaining, state.amountCalculated)
+            : (state.amountCalculated, amountSpecified - state.amountSpecifiedRemaining);
+
+        // Trabsfer the Tokens
+        if (zeroForOne) {
+            if (amount1 < 0) {
+                IERC20(token1).transfer(recipient, uint256(-amount1));
+                IERC20(token0).transferFrom(msg.sender, address(this), uint256(amount0));
+            }
+        } else {
+            if (amount0 < 0) {
+                IERC20(token0).transfer(recipient, uint256(-amount0));
+                IERC20(token1).transferFrom(msg.sender, address(this), uint256(amount1));
+            }
         }
     }
 }
