@@ -359,8 +359,46 @@ contract CLAMM {
             liquidity: cache.liquidityStart
         });
 
-        // amountCalculated: while loop ToDo
-        while (true) {}
+        // WHILE LOOP: amountCalculated: while loop ToDo
+        while (
+            state.amountSpecifiedRemaining != 0
+                && state.sqrtPriceX96 != sqrtPriceLimitX96;
+        ) {
+            StepComputations memory step;
+            step.sqrtPriceStartX96 = state.sqrtPriceX96;
+            // NEXT TICK: Initialise 
+            step.tickNext = state.tick +1;
+            step.sqrtPriceNextX96 = TickMath.getSqrtRatioAtTick(step.tickNext);
+
+            (state.sqrtPriceX96, step.amountIn, step.amountOut, step.feeAmount) = SwapMath.computeSwapStep(
+                state.sqrtPriceX96,
+                // zero for one --> max(next, limit)
+                // one for zero --> min(next, limit)
+                (
+                    zeroForOne
+                        ? step.sqrtPriceNextX96 < sqrtPriceLimitX96
+                        : step.sqrtPriceNextX96 > sqrtPriceLimitX96
+                ) ? sqrtPriceLimitX96 : step.sqrtPriceNextX96,
+                state.liquidity,
+                state.amountSpecifiedRemaining,
+                fee
+            );
+
+            if (exactInput) {
+                // Decreases to 0
+                state.amountSpecifiedRemaining -=
+                    (step.amountIn + step.feeAmount).toInt256();
+                state.amountCalculated -= step.amountOut.toInt256();
+            } else {
+                // Increases to 0
+                state.amountSpecifiedRemaining += step.amountOut.toInt256();
+                state.amountCalculated +=
+                    (step.amountIn + step.feeAmount).toInt256();
+            }  
+
+
+
+            }
         // update tick and write an oracle entry if the tick change
 
         // Update sqrtPriceX96 and tick, if not same then update
