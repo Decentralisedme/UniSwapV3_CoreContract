@@ -7,6 +7,7 @@ import {TickMath} from "./lib/TickMath.sol";
 import {Position} from "./lib/Position.sol";
 import {SafeCast} from "./lib/SafeCast.sol";
 import {IERC20} from "./interfaces/IERC20.sol";
+import {SqrtPriceMath} from "./lib/SqrtPriceMath.sol";
 
 contract CLAMM {
     using SafeCast for int256;
@@ -43,6 +44,7 @@ contract CLAMM {
     }
 
     Slot0 public slot0;
+    uint128 public liquidity;
 
     ///////////
     // Mappings
@@ -126,8 +128,49 @@ contract CLAMM {
         // 3- call function to update position
         position = _updatePosition(params.owner, params.tickLower, params.tickUpper, params.liquidityDelta, _slot0.tick);
 
-        // Info storage is storage state variable: w need a mapping
-        return (positions[bytes32(0)], 0, 0);
+        // We have 3 cases:
+        // 1- Current Pr < LowerPr range
+        // 2- LowerPr range < Current Pr < UpperPr range
+        // 3- Current Pr > UpperPr range
+        // We write the 3 codition in side a require LiqDelta != 0
+        if (params.liquidityDelta != 0) {
+            // 1
+            if (_slot0.tick < params.tickLower) {
+                // All liq in token0
+                amount0 = SqrtPriceMath.getAmount0Delta(
+                    TickMath.getSqrtRatioAtTick(params.tickLower),
+                    TickMath.getSqrtRatioAtTick(params.tickUpper),
+                    params.liquidityDelta
+                );
+                //sqrtRatioAX96, sqrtRatioBX96, liquidity, roundUp);
+            } else if (_slot0.tick < params.tickUpper) {
+                // 2
+                amount0 = SqrtPriceMath.getAmount0Delta(
+                    _slot0.sqrtPriceX96, //current price
+                    TickMath.getSqrtRatioAtTick(params.tickUpper),
+                    params.liquidityDelta
+                );
+                amount1 = SqrtPriceMath.getAmount1Delta(
+                    TickMath.getSqrtRatioAtTick(params.tickLower),
+                    _slot0.sqrtPriceX96, //current price
+                    params.liquidityDelta
+                );
+                // update Liq
+                liquidity = params.liquidityDelta < 0
+                    ? liquidity - uint128(-params.liquidityDelta)
+                    : liquidity + uint128(params.liquidityDelta);
+            } else {
+                // 3- All liq in token0
+                amount1 = SqrtPriceMath.getAmount1Delta(
+                    TickMath.getSqrtRatioAtTick(params.tickLower),
+                    TickMath.getSqrtRatioAtTick(params.tickUpper),
+                    params.liquidityDelta
+                );
+            }
+        }
+
+        // Info storage is storage state variable: w need a mapping No Need Anymore
+        // return (positions[bytes32(0)], 0, 0);
     }
 
     function checkTicks(int24 tickLower, int24 tickUpper) private pure {
@@ -179,6 +222,59 @@ contract CLAMM {
                     ticks.clear(tickUpper);
                 }
             }
+        }
+    }
+
+    function collect(
+        address recipient,
+        int24 tickLower,
+        int24 tickUpper,
+        uint128 amount0Requested,
+        uint128 amount1Requested
+    ) external lock returns (uint128 amount0, uint128 amount1) {
+        // get the position: since updateing state variable position >> storage
+        Position.Info storage position = positions.get(msg.sender, tickLower, tickUpper);
+        // calc actual amount of token to be transfer out of the Pool
+        // Read: if amnt0Req > positionTokenOwed then amount = tokenOwed, otehrwise (:) amountRequested
+        amount0 = amount0Requested > position.tokensOwed0 ? position.tokensOwed0 : amount0Requested;
+        amount1 = amount1Requested > position.tokensOwed1 ? position.tokensOwed1 : amount1Requested;
+
+        // Update Positions and transfer
+        if (amount0 > 0) {
+            position.tokensOwed0 -= amount0;
+            // Here in CoreV3 code uses safeTransfer, we keep simple
+            IERC20(token0).transfer(recipient, amount0);
+        }
+        if (amount0 > 0) {
+            position.tokensOwed1 -= amount1;
+            // Here in CoreV3 code uses safeTransfer, we keep simple
+            IERC20(token1).transfer(recipient, amount1);
+        }
+    }
+
+    // burn funct does not transfer any token, to do so you need to use collect
+    function burn(int24 tickLower, int24 tickUpper, uint128 amount)
+        external
+        lock
+        returns (uint256 amount0, uint256 amount1)
+    {
+        // amount to remove = liquidityDelta
+        // So LiqDelta must be negative and since liq is int128 >> toInt128()
+        // So also amount0Int and amount1Int must be neg >> we need to cast
+        (Position.Info memory position, int256 amount0Int, int256 amount1Int) = _modifyPosition(
+            ModifyPositionParams({
+                owner: msg.sender,
+                tickLower: tickLower,
+                tickUpper: tickUpper,
+                liquidityDelta: -int256(uint256(amount)).toInt128() // this amount to remove >> negative also buing liq must be in128
+            })
+        );
+        amount0 = uint256(-amount0Int);
+        amount1 = uint256(-amount1Int);
+
+        if (amount0 > 0 || amount1 > 0) {
+            (position.tokensOwed0, position.tokensOwed1) =
+                (position.tokensOwed0 + uint128(amount0), position.tokensOwed1 + uint128(amount1));
         }
     }
 }
