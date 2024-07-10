@@ -8,6 +8,7 @@ import {Position} from "./lib/Position.sol";
 import {SafeCast} from "./lib/SafeCast.sol";
 import {IERC20} from "./interfaces/IERC20.sol";
 import {SqrtPriceMath} from "./lib/SqrtPriceMath.sol";
+import {SwapMath} from "./lib/SwapMath.sol";
 
 contract CLAMM {
     using SafeCast for int256;
